@@ -1,0 +1,119 @@
+name: Windows-QEMU-RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_artifact_name:
+        description: 'Artifact name with the QCOW2 Windows image (Windows 11 or Server 2025)'
+        required: true
+      tailscale_auth_key:
+        description: 'Tailscale auth key'
+        required: true
+
+jobs:
+  run-windows-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      USERNAME: rdpuser
+      PASSWORD: SuperParola123!
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm curl socat genisoimage
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Start Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ github.event.inputs.tailscale_auth_key }}
+        run: |
+          sudo tailscaled &
+          sleep 2
+          sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gh-qemu-${{ github.run_id }} || true
+          for i in {1..20}; do
+            TS_IP=$(sudo tailscale ip -4 2>/dev/null || true)
+            if [ -n "$TS_IP" ]; then
+              echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$TS_IP" ]; then
+            echo "ERROR: Tailscale IP not assigned"
+            exit 1
+          fi
+          echo "Tailscale IP: $TS_IP"
+
+      - name: Download Windows VM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.vm_artifact_name }}
+          path: ~/vm
+
+      - name: Verify VM image exists
+        run: |
+          cd ~/vm
+          FILE=$(find . -type f -size +100M | head -n1)
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No VM image found in artifact"
+            exit 1
+          fi
+          mv "$FILE" server.qcow2
+          ls -lh server.qcow2
+
+      - name: Start QEMU VM
+        run: |
+          cd ~/vm
+          nohup qemu-system-x86_64 \
+            -enable-kvm \
+            -m 16384 \
+            -cpu Skylake-Client \
+            -smp 4 \
+            -drive file=server.qcow2,format=qcow2,if=virtio \
+            -netdev user,id=n1,hostfwd=tcp::3389-:3389 \
+            -device virtio-net-pci,netdev=n1 \
+            -vga qxl \
+            -nographic \
+            -serial file:serial.log > qemu.log 2>&1 &
+
+          echo $! > qemu.pid
+          sleep 30
+          echo "QEMU VM started"
+
+      - name: Display RDP info continuously for 6 hours
+        run: |
+          echo "=== RDP ACCESS INFORMATION ==="
+          echo "Tailscale IP: ${{ env.TAILSCALE_IP }}"
+          echo "Username: ${{ env.USERNAME }}"
+          echo "Password: ${{ env.PASSWORD }}"
+          echo "================================"
+          SECONDS_TO_RUN=$((6*3600))
+          INTERVAL=300
+          END=$((SECONDS + SECONDS_TO_RUN))
+          while [ $SECONDS -lt $END ]; do
+            date +"%Y-%m-%d %H:%M:%S - RDP Info"
+            echo "Tailscale IP: ${{ env.TAILSCALE_IP }} | Port: 3389 | User: ${{ env.USERNAME }} | Pass: ${{ env.PASSWORD }}"
+            if [ -f ~/vm/serial.log ]; then
+              echo "---- Last serial.log lines ----"
+              tail -n 20 ~/vm/serial.log || true
+            fi
+            if [ -f ~/vm/qemu.log ]; then
+              echo "---- Last qemu.log lines ----"
+              tail -n 50 ~/vm/qemu.log || true
+            fi
+            sleep $INTERVAL
+          done
+          echo "6 hours elapsed. Stopping QEMU."
+          if [ -f ~/vm/qemu.pid ]; then
+            kill $(cat ~/vm/qemu.pid) || true
+          fi
+          
