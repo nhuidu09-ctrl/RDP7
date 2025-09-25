@@ -1,0 +1,59 @@
+name: RDP-QEMU-Windows-Server-2025
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 380  # 6h și 20 min pentru siguranță
+
+    steps:
+      - name: Install QEMU and KVM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-clients libvirt-daemon-system bridge-utils
+
+      - name: Prepare 500GB qcow2 image
+        run: |
+          if [ ! -f windows_server_2025.qcow2 ]; then
+            qemu-img create -f qcow2 windows_server_2025.qcow2 500G
+            # Imaginea Windows Server 2025 trebuie configurată separat înainte
+          fi
+
+      - name: Start Windows Server 2025 VM with QEMU + KVM
+        run: |
+          nohup qemu-system-x86_64 \
+            -enable-kvm \
+            -m 32768 \
+            -smp 8 \
+            -cpu host \
+            -machine q35,accel=kvm \
+            -drive file=windows_server_2025.qcow2,if=virtio,cache=writeback,discard=unmap \
+            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
+            -device virtio-net,netdev=net0 \
+            -bios /usr/share/OVMF/OVMF_CODE.fd \
+            -usb -device usb-tablet -device usb-kbd \
+            -vga qxl > vm.log 2>&1 &
+          sleep 90
+
+      - name: Setup user RDP local in VM (manual or script in image)
+        run: echo "User creation + RDP enabled manually or preconfigured in VM image"
+
+      - name: Display RDP access details and IP
+        shell: bash
+        env:
+          RDP_USER: "RDP"
+          # Parola trebuie setată manual în VM sau folosește script în VM pentru generare
+        run: |
+          echo "RDP Address: 127.0.0.1:3389 (host forwarding)"
+          echo "Username: $RDP_USER"
+          echo "Password: (validă din VM)"
+          echo "Pentru a accesa folosește Remote Desktop folosind aceste credențiale."
+
+      - name: Keep VM running for 6 hours, allow error continue
+        run: |
+          SECS=$((6 * 3600))
+          echo "VM ruleaza pentru $SECS secunde (6 ore)"
+          timeout $SECS bash -c 'while true; do sleep 60; done' || echo "Terminat dupa 6 ore"
+
