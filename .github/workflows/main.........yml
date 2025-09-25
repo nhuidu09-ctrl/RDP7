@@ -1,0 +1,132 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 400   # puțin peste 6 ore pentru siguranță
+
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Install QEMU & utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm wget curl socat
+
+      - name: Generate RDP credentials (displayed in logs as requested)
+        id: creds
+        run: |
+          USERNAME="rdpuser"
+          # Generate a 16-char strong password (upper, lower, digits, symbols)
+          PASS=$(tr -dc 'A-Za-z0-9!@#$%&*()-_=+[]{}<>?' </dev/urandom | head -c16)
+          echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+          echo "PASSWORD=$PASS" >> $GITHUB_ENV
+          # show to logs (you asked to show real in logs)
+          echo "=== RDP CREDENTIALS (ATTENTION: visible in workflow logs) ==="
+          echo "Username: $USERNAME"
+          echo "Password: $PASS"
+          echo "==========================================================="
+
+      - name: Install Tailscale and bring up
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          # start tailscaled and bring up (needs sudo)
+          sudo tailscaled & sleep 1
+          # use supplied authkey; hostname unique per run
+          sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gh-qemu-${{ github.run_id }} || true
+          # wait for IPv4 address
+          for i in {1..20}; do
+            TS_IP=$(sudo tailscale ip -4 2>/dev/null || true)
+            if [ -n "$TS_IP" ]; then
+              echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$TS_IP" ]; then
+            echo "ERROR: Tailscale IPv4 not acquired"
+            exit 1
+          fi
+          echo "Tailscale up, IP: $TS_IP"
+
+      - name: Download your VM image
+        run: |
+          mkdir -p ~/vm
+          cd ~/vm
+          # Schimbă linkul de mai jos cu cel real al imaginii tale QCOW2/VHDX/RAW etc.
+          # Dacă ai încărcat imaginea altfel, adaptează acest pas (sau folosește artifact).
+          VM_IMAGE_URL="https://linkul_tau_catre_imagine.qcow2"
+          if [ -z "$VM_IMAGE_URL" ] || [[ "$VM_IMAGE_URL" == "https://linkul_tau_catre_imagine.qcow2" ]]; then
+            echo "ERROR: Înlocuiește VM_IMAGE_URL cu URL-ul real al imaginii tale."
+            exit 1
+          fi
+          wget -O server2025.qcow2 "$VM_IMAGE_URL"
+
+      - name: Start QEMU VM (16GB RAM, Intel Skylake (7th gen) emulation) and forward RDP
+        run: |
+          mkdir -p ~/vm/logs
+          cd ~/vm
+          # Forward host port 13389 to guest 3389 to avoid collisions - but we will forward 3389 as requested
+          # Use hostfwd on user network: host port 3389 -> guest 3389
+          nohup qemu-system-x86_64 \
+            -enable-kvm \
+            -m 16384 \
+            -cpu Skylake-Client \
+            -smp 8 \
+            -drive file=server2025.qcow2,format=qcow2,if=virtio \
+            -netdev user,id=n1,hostfwd=tcp::3389-:3389 \
+            -device virtio-net-pci,netdev=n1 \
+            -vga qxl \
+            -monitor unix:~/vm/qemu-monitor.sock,server,nowait \
+            -serial file:~/vm/logs/serial.log \
+            -display none > ~/vm/logs/qemu.out 2>&1 &
+
+          QEMU_PID=$!
+          echo $QEMU_PID > ~/vm/qemu.pid
+          sleep 12
+          echo "QEMU started (PID $QEMU_PID). Logs: ~/vm/logs/qemu.out"
+
+      - name: Print connection info (IP, username, password) repeatedly while running 6 hours
+        env:
+          USERNAME: ${{ env.USERNAME }}
+          PASSWORD: ${{ env.PASSWORD }}
+          TAILSCALE_IP: ${{ env.TAILSCALE_IP }}
+        run: |
+          echo "=== RDP ACCESS INFO (will be printed repeatedly for 6 hours) ==="
+          echo "Tailscale IP: ${TAILSCALE_IP}"
+          echo "RDP Host Port: 3389 (host -> guest forwarded)"
+          echo "Username: ${USERNAME}"
+          echo "Password: ${PASSWORD}"
+          echo "If you haven't created the user inside the Windows VM, log into the VM console and create the user with these credentials."
+          echo "================================================================"
+          # run a loop to keep the job alive for 6 hours and print every 5 minutes
+          SECONDS_TO_RUN=$((6 * 3600))   # 6 hours = 21600
+          INTERVAL=300                   # 5 minutes
+          END=$((SECONDS + SECONDS_TO_RUN))
+          while [ $SECONDS -lt $END ]; do
+            date +"%Y-%m-%d %H:%M:%S - RDP INFO"
+            echo "Tailscale IP: ${TAILSCALE_IP}  Port: 3389  User: ${USERNAME}  Pass: ${PASSWORD}"
+            # also show last lines from QEMU serial/log to help debugging
+            if [ -f ~/vm/logs/serial.log ]; then
+              echo "---- last serial.log lines ----"
+              tail -n 20 ~/vm/logs/serial.log || true
+            fi
+            if [ -f ~/vm/logs/qemu.out ]; then
+              echo "---- last qemu.out lines ----"
+              tail -n 50 ~/vm/logs/qemu.out || true
+            fi
+            sleep $INTERVAL
+          done
+          echo "6 hours elapsed. Shutting down QEMU gracefully (if possible)."
+          if [ -f ~/vm/qemu.pid ]; then
+            PID=$(cat ~/vm/qemu.pid)
+            echo "Killing QEMU pid $PID"
+            kill $PID || true
+          fi
+          
