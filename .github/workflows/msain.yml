@@ -1,0 +1,401 @@
+name: RDP Windows - Real GPU Premium (NVIDIA/AMD)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Durata rulării (ore)'
+        required: false 
+        default: '6'
+        type: choice
+        options:
+        - '2'
+        - '4'
+        - '6'
+        - '8'
+      gpu_priority:
+        description: 'Prioritate GPU'
+        required: false
+        default: 'nvidia'
+        type: choice
+        options:
+        - 'nvidia'
+        - 'amd'
+        - 'intel'
+
+jobs:
+  premium-gpu-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.runtime_hours * 60 }}
+
+    steps:
+    - name: Set Runtime Variables
+      run: |
+        $hours = ${{ inputs.runtime_hours }}
+        $gpuPriority = "${{ inputs.gpu_priority }}"
+        echo "RUNTIME_HOURS=$hours" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "GPU_PRIORITY=$gpuPriority" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "⏰ Durata setată: $hours ore"
+        Write-Host "🎯 Prioritate GPU: $gpuPriority"
+
+    - name: Detect Premium GPU Hardware
+      run: |
+        Write-Host "🔍 Detectare hardware GPU premium..."
+        
+        # Detectare avansată GPU
+        $gpus = Get-WmiObject Win32_VideoController | Where-Object {
+            $_.Name -notlike "*Microsoft*" -and 
+            $_.Name -notlike "*Remote*" -and
+            $_.AdapterRAM -gt 512MB
+        } | Sort-Object AdapterRAM -Descending
+        
+        $premiumGpu = $null
+        $gpuPriority = "$env:GPU_PRIORITY"
+        
+        if ($gpus) {
+            # Prioritizare după preferință
+            if ($gpuPriority -eq "nvidia") {
+                $premiumGpu = $gpus | Where-Object { $_.Name -like "*NVIDIA*" -or $_.Name -like "*GeForce*" -or $_.Name -like "*RTX*" } | Select-Object -First 1
+            } elseif ($gpuPriority -eq "amd") {
+                $premiumGpu = $gpus | Where-Object { $_.Name -like "*AMD*" -or $_.Name -like "*Radeon*" -or $_.Name -like "*RX*" } | Select-Object -First 1
+            }
+            
+            # Fallback la cel mai puternic GPU
+            if (-not $premiumGpu) {
+                $premiumGpu = $gpus | Select-Object -First 1
+            }
+        }
+        
+        if ($premiumGpu) {
+            $vramGB = [math]::Round($premiumGpu.AdapterRAM/1GB, 1)
+            Write-Host "🚀 GPU PREMIUM DETECTAT: $($premiumGpu.Name)"
+            Write-Host "   💾 VRAM: $vramGB GB"
+            Write-Host "   📦 Driver: $($premiumGpu.DriverVersion)"
+            Write-Host "   🔧 Procesor: $($premiumGpu.VideoProcessor)"
+            
+            echo "REAL_GPU_NAME=$($premiumGpu.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            echo "REAL_GPU_VRAM=$vramGB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            echo "REAL_GPU_DRIVER=$($premiumGpu.DriverVersion)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            echo "GPU_PREMIUM=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        } else {
+            Write-Host "⚠️ Nu s-a detectat GPU premium - folosim cel mai bun disponibil"
+            $integratedGpu = Get-WmiObject Win32_VideoController | Select-Object -First 1
+            $vramGB = [math]::Round($integratedGpu.AdapterRAM/1GB, 1)
+            
+            echo "REAL_GPU_NAME=$($integratedGpu.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            echo "REAL_GPU_VRAM=$vramGB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            echo "GPU_PREMIUM=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        }
+
+    - name: Install GPU Drivers (NVIDIA/AMD)
+      run: |
+        Write-Host "📥 Instalare/Actualizare drivere GPU..."
+        
+        # Verificăm dacă avem GPU premium
+        if ("$env:GPU_PREMIUM" -eq "true") {
+            $gpuName = "$env:REAL_GPU_NAME"
+            
+            if ($gpuName -like "*NVIDIA*" -or $gpuName -like "*GeForce*") {
+                Write-Host "🎮 Detectat NVIDIA GPU - Optimizări specifice..."
+                
+                # Script optimizări NVIDIA
+                $nvidiaScript = @'
+# Optimizări NVIDIA
+echo "🚀 Aplicăm optimizări NVIDIA..."
+
+# Setări performanță maximă
+nvidia-smi -pl 100 2>$null
+nvidia-smi -ac 7000,1800 2>$null
+
+# Setări registry pentru performanță
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global" /v "NgxCoreMode" /t REG_DWORD /d 1 /f 2>$null
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "HwSchMode" /t REG_DWORD /d 2 /f 2>$null
+
+echo "✅ Optimizări NVIDIA aplicate"
+'@
+                Set-Content -Path "$env:TEMP\optimize_nvidia.ps1" -Value $nvidiaScript
+                PowerShell -ExecutionPolicy Bypass -File "$env:TEMP\optimize_nvidia.ps1"
+                
+            } elseif ($gpuName -like "*AMD*" -or $gpuName -like "*Radeon*") {
+                Write-Host "🎮 Detectat AMD GPU - Optimizări specifice..."
+                
+                # Script optimizări AMD
+                $amdScript = @'
+# Optimizări AMD
+echo "🚀 Aplicăm optimizări AMD..."
+
+# Setări registry AMD
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000" /v "PP_PhmSoftPowerPlayTable" /t REG_BINARY /d "01" /f 2>$null
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000" /v "EnableUlps" /t REG_DWORD /d 0 /f 2>$null
+
+echo "✅ Optimizări AMD aplicate"
+'@
+                Set-Content -Path "$env:TEMP\optimize_amd.ps1" -Value $amdScript
+                PowerShell -ExecutionPolicy Bypass -File "$env:TEMP\optimize_amd.ps1"
+            }
+        }
+
+    - name: Configure Premium RDP with GPU Acceleration
+      run: |
+        Write-Host "🌐 Configurare RDP premium cu acceleratie GPU..."
+        
+        # Activează RDP
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        
+        # Optimizări RDP pentru GPU
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxMonitors" -Value 4 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxXResolution" -Value 3840 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxYResolution" -Value 2160 -Force
+        
+        # Forțează utilizarea GPU pentru RDP
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v "bEnumerateHWBeforeSW" /t REG_DWORD /d 1 /f
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v "AVCHardwareEncodePreferred" /t REG_DWORD /d 1 /f
+        
+        # Reguli firewall
+        netsh advfirewall firewall add rule name="RDP-Premium-GPU" dir=in protocol=TCP localport=3389 action=allow
+        netsh advfirewall firewall add rule name="RDP-Premium-GPU-UDP" dir=in protocol=UDP localport=3389 action=allow
+        
+        Write-Host "✅ RDP premium configurat"
+
+    - name: Create Premium RDP User
+      run: |
+        Write-Host "👤 Creare utilizator RDP premium..."
+        
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Șterge utilizatorul existent (dacă există)
+        Remove-LocalUser -Name "GPUPro" -ErrorAction SilentlyContinue
+        
+        # Crează utilizator nou cu drepturi extinse
+        New-LocalUser -Name "GPUPro" -Password $securePassword -AccountNeverExpires -PasswordNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "GPUPro"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUPro"
+        Add-LocalGroupMember -Group "Performance Log Users" -Member "GPUPro"
+        
+        echo "RDP_USER=GPUPro" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "RDP_PASS=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        Write-Host "✅ Utilizator premium creat"
+
+    - name: Install Gaming & GPU Tools
+      run: |
+        Write-Host "🎮 Instalare utilitare gaming și GPU..."
+        
+        # DirectX End-User Runtime
+        $dxUrl = "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe"
+        Invoke-WebRequest -Uri $dxUrl -OutFile "$env:TEMP\directx_redist.exe" -UseBasicParsing
+        
+        # Visual C++ Redistributables (pentru jocuri și aplicații)
+        $vc2015Url = "https://aka.ms/vs/16/release/vc_redist.x64.exe"
+        $vc2019Url = "https://aka.ms/vs/16/release/vc_redist.x64.exe"
+        
+        Invoke-WebRequest -Uri $vc2015Url -OutFile "$env:TEMP\vc_redist2015.x64.exe" -UseBasicParsing
+        Invoke-WebRequest -Uri $vc2019Url -OutFile "$env:TEMP\vc_redist2019.x64.exe" -UseBasicParsing
+        
+        # Instalare silențioasă
+        Start-Process -FilePath "$env:TEMP\vc_redist2015.x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait -NoNewWindow
+        Start-Process -FilePath "$env:TEMP\vc_redist2019.x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait -NoNewWindow
+        
+        Write-Host "✅ Utilitare gaming instalate"
+
+    - name: Install Tailscale Premium
+      run: |
+        Write-Host "🔗 Instalare Tailscale..."
+        
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart")
+        Start-Sleep -Seconds 10
+
+    - name: Connect Tailscale
+      run: |
+        Write-Host "🌍 Conectare Tailscale..."
+        
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=premiumgpu-$env:GITHUB_RUN_ID --advertise-tags=tag:premium-gpu
+        
+        $maxRetries = 20
+        $retryCount = 0
+        do {
+            Start-Sleep -Seconds 3
+            $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            $retryCount++
+        } while (-not $tsIP -and $retryCount -lt $maxRetries)
+        
+        if (-not $tsIP) {
+            Write-Host "❌ Eroare: Nu s-a primit IP Tailscale"
+            exit 1
+        }
+        
+        echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "✅ IP Tailscale: $tsIP"
+
+    - name: Create Advanced GPU Monitor
+      run: |
+        Write-Host "📊 Creare monitor GPU avansat..."
+        
+        $advancedMonitor = @'
+function Get-PremiumGPUStats {
+    $gpus = Get-WmiObject Win32_VideoController | Where-Object {$_.Name -notlike "*Microsoft*"} | Sort-Object AdapterRAM -Descending
+    $primaryGpu = $gpus | Select-Object -First 1
+    
+    if ($primaryGpu) {
+        # Încercăm să obținem mai multe detalii
+        $vramGB = [math]::Round($primaryGpu.AdapterRAM/1GB, 1)
+        
+        # Verificăm temperatură și utilizare (dacă este posibil)
+        try {
+            $gpuUsage = Get-Counter "\GPU Engine(*engtype_3D)\Utilization Percentage" -ErrorAction SilentlyContinue
+            $currentUsage = ($gpuUsage.CounterSamples | Where-Object {$_.InstanceName -like "*GPU*"} | Measure-Object -Property CookedValue -Maximum).Maximum
+        } catch {
+            $currentUsage = "N/A"
+        }
+        
+        return @{
+            Name = $primaryGpu.Name
+            VRAM = $vramGB
+            Driver = $primaryGpu.DriverVersion
+            Processor = $primaryGpu.VideoProcessor
+            Usage = $currentUsage
+            Status = "Premium"
+            GPUs = $gpus.Count
+        }
+    }
+    
+    return @{
+        Name = "GPU Integrated"
+        VRAM = 1.0
+        Driver = "10.0.19041.1"
+        Processor = "Basic"
+        Usage = "N/A"
+        Status = "Basic"
+        GPUs = 1
+    }
+}
+
+function Show-PerformanceMetrics {
+    $cpuUsage = (Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue
+    $ramUsage = (Get-Counter "\Memory\Available MBytes").CounterSamples.CookedValue
+    $totalRAM = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1MB
+    $ramUsagePercent = [math]::Round(($totalRAM - $ramUsage) / $totalRAM * 100, 1)
+    
+    return @{
+        CPU = [math]::Round($cpuUsage, 1)
+        RAM = $ramUsagePercent
+        AvailableRAM = [math]::Round($ramUsage)
+    }
+}
+
+$startTime = Get-Date
+$endTime = $startTime.AddHours($env:RUNTIME_HOURS)
+
+while ((Get-Date) -lt $endTime) {
+    $gpuStats = Get-PremiumGPUStats
+    $perfStats = Show-PerformanceMetrics
+    $timeLeft = $endTime - (Get-Date)
+    $hoursLeft = [math]::Round($timeLeft.TotalHours, 1)
+    $minutesLeft = [math]::Round($timeLeft.TotalMinutes)
+    
+    Clear-Host
+    Write-Host "=" * 80
+    Write-Host "🎮 PREMIUM GPU RDP - PERFORMANCE MONITOR"
+    Write-Host "=" * 80
+    Write-Host ""
+    Write-Host "🔧 HARDWARE PREMIUM:"
+    Write-Host "   🖥️  GPU: $($gpuStats.Name)"
+    Write-Host "   💾 VRAM: $($gpuStats.VRAM) GB"
+    Write-Host "   📦 Driver: $($gpuStats.Driver)"
+    Write-Host "   ⚡ Procesor: $($gpuStats.Processor)"
+    Write-Host "   📊 Utilizare GPU: $($gpuStats.Usage)%"
+    Write-Host "   🔢 GPU-uri detectate: $($gpuStats.GPUs)"
+    Write-Host ""
+    Write-Host "📈 PERFORMANȚĂ SISTEM:"
+    Write-Host "   🧠 CPU: $($perfStats.CPU)%"
+    Write-Host "   💽 RAM: $($perfStats.RAM)% (Disponibil: $($perfStats.AvailableRAM) MB)"
+    Write-Host ""
+    Write-Host "🌐 CONEXIUNE PREMIUM:"
+    Write-Host "   📡 IP: $env:TAILSCALE_IP"
+    Write-Host "   👤 User: $env:RDP_USER"
+    Write-Host "   ⏰ Rămas: $hoursLeft ore ($minutesLeft minute)"
+    Write-Host ""
+    Write-Host "🎯 STATUT: $($gpuStats.Status) MODE"
+    Write-Host "=" * 80
+    
+    Start-Sleep -Seconds 10
+}
+'@
+        Set-Content -Path "$env:TEMP\premium_gpu_monitor.ps1" -Value $advancedMonitor
+
+    - name: Display Premium Connection Info
+      run: |
+        Write-Host ""
+        Write-Host "=" * 80
+        Write-Host "🎮 RDP CU GPU PREMIUM - CONEXIUNE"
+        Write-Host "=" * 80
+        Write-Host "🌐 IP: $env:TAILSCALE_IP"
+        Write-Host "👤 User: $env:RDP_USER"
+        Write-Host "🔐 Parola: $env:RDP_PASS"
+        Write-Host "⏰ Durata: $env:RUNTIME_HOURS ore"
+        Write-Host "🎯 Prioritate: $env:GPU_PRIORITY"
+        Write-Host "🔧 GPU: $env:REAL_GPU_NAME"
+        Write-Host "💾 VRAM: $env:REAL_GPU_VRAM GB"
+        Write-Host "📦 Driver: $env:REAL_GPU_DRIVER"
+        Write-Host ""
+        Write-Host "🚀 CARACTERISTICI PREMIUM:"
+        Write-Host "   • Accelerare GPU hardware"
+        Write-Host "   • Rezoluție 4K support"
+        Write-Host "   • Optimizări gaming"
+        Write-Host "   • Monitorizare avansată"
+        Write-Host ""
+        Write-Host "📝 Conectare: mstsc /v:$env:TAILSCALE_IP /f /w:1920 /h:1080"
+        Write-Host "=" * 80
+
+    - name: Run Premium GPU Session
+      run: |
+        Write-Host "🚀 Pornire sesiune RDP premium..."
+        
+        # Pornim monitorul premium în background
+        Start-Process PowerShell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", "$env:TEMP\premium_gpu_monitor.ps1" -WindowStyle Hidden
+        
+        # Optimizări finale de sistem
+        Write-Host "⚡ Aplicăm optimizări finale..."
+        powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  # High performance
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Force
+        
+        # Așteptăm timpul setat cu update-uri periodice
+        $seconds = $env:RUNTIME_HOURS * 3600
+        Write-Host "⏰ Sesiune premium activă pentru $env:RUNTIME_HOURS ore ($seconds secunde)"
+        
+        for ($i = 1; $i -le $seconds; $i++) {
+            if ($i % 180 -eq 0) {  # Afișăm la fiecare 3 minute
+                $minutesLeft = [math]::Round(($seconds - $i) / 60)
+                $timeStamp = Get-Date -Format 'HH:mm:ss'
+                Write-Host "[$timeStamp] ✅ RDP Premium Activ - Rămas: $minutesLeft minute"
+            }
+            Start-Sleep -Seconds 1
+        }
+
+    - name: Premium Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Curățare premium..."
+        
+        # Oprim monitorul
+        Get-Process PowerShell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*premium_gpu_monitor*" } | Stop-Process -Force
+        
+        # Restaurăm setări
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force
+        powercfg -setactive 381b4222-f694-41f0-9685-ff5bb260df2e  # Balanced
+        
+        # Curățăm reguli firewall
+        netsh advfirewall firewall delete rule name="RDP-Premium-GPU" 2>$null
+        netsh advfirewall firewall delete rule name="RDP-Premium-GPU-UDP" 2>$null
+        
+        # Ștergem utilizatorul
+        Remove-LocalUser -Name "GPUPro" -ErrorAction SilentlyContinue
+        
+        Write-Host "✅ Curățare premium completă"
