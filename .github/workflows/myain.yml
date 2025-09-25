@@ -1,0 +1,79 @@
+name: Multi-GPU Gaming/Benchmark RDP with Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-multi-gpu-rdp:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Tailscale
+        run: |
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-ipn-setup.exe" -OutFile "C:\tailscale.exe"
+          Start-Process "C:\tailscale.exe" -ArgumentList "up --authkey $env:TAILSCALE_AUTH_KEY" -Wait
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Generate Temporary User and Password
+        run: |
+          $user = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
+          $password = [System.Web.Security.Membership]::GeneratePassword(12,2)
+          net user $user $password /add
+          net localgroup "Administrators" $user /add
+          Write-Host "Temporary RDP User Created: $user"
+          Write-Host "Temporary Password: $password"
+          Set-Variable -Name "TEMP_USER" -Value $user
+          Set-Variable -Name "TEMP_PASS" -Value $password
+
+      - name: Display Tailscale IP
+        run: |
+          $tailscale_ip = (tailscale ip | Select-String -Pattern "\d+\.\d+\.\d+\.\d+")
+          Write-Host "Connect via RDP to the following Tailscale IP:"
+          Write-Host "IP: $tailscale_ip"
+          Write-Host "User: $env:TEMP_USER"
+          Write-Host "Password: $env:TEMP_PASS"
+
+      - name: Detect and List GPUs
+        run: |
+          Write-Host "Detecting available GPUs..."
+          $gpus = Get-WmiObject Win32_VideoController | Select-Object Name, AdapterRAM
+          $gpu_count = $gpus.Count
+          Write-Host "Number of GPUs detected: $gpu_count"
+          foreach ($gpu in $gpus) {
+              Write-Host "GPU: $($gpu.Name), Memory: $($gpu.AdapterRAM / 1MB) MB"
+          }
+
+      - name: Install GPU Drivers (if NVIDIA)
+        run: |
+          # Exemplu pentru drivere NVIDIA; pentru Intel sau AMD trebuie alt script
+          if (Get-WmiObject Win32_VideoController | Where-Object {$_.Name -like "*NVIDIA*"}) {
+              Write-Host "NVIDIA GPU detected. Installing drivers..."
+              # Descărcare și instalare driver NVIDIA (exemplu)
+              Invoke-WebRequest -Uri "https://us.download.nvidia.com/Windows/531.79/531.79-desktop-win10-win11-64bit-international.exe" -OutFile "C:\nvidia_driver.exe"
+              Start-Process "C:\nvidia_driver.exe" -ArgumentList "-s" -Wait
+          } else {
+              Write-Host "No NVIDIA GPU detected or already has drivers."
+          }
+
+      - name: Run GPU Tasks on All GPUs
+        run: |
+          Write-Host "Running tasks on all detected GPUs..."
+          $gpus = Get-WmiObject Win32_VideoController | Select-Object Name
+          foreach ($gpu in $gpus) {
+              Write-Host "Starting task on GPU: $($gpu.Name)"
+              # Exemplu: rulează script Python care poate folosi GPU specific
+              python run_gpu_task.py --gpu $($gpu.Name)
+          }
+
+      - name: Shutdown after 6 hours
+        run: |
+          Write-Host "Workflow will sleep for 6 hours before shutdown..."
+          Start-Sleep -Seconds 21600
+          Stop-Computer
+          
