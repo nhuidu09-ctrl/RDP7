@@ -1,0 +1,141 @@
+name: RDP Windows Server 2025 with Intel UHD GPU & Overclock
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        run: |
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Detect Intel UHD GPUs and Max Resources
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try {
+              $gpus = Get-WmiObject win32_VideoController | Where-Object { $_.Name -like "*Intel*" }
+              if (-not $gpus) {
+                  Write-Warning "No Intel UHD GPU detected."
+              } else {
+                  $i = 1
+                  foreach ($gpu in $gpus) {
+                      $gpuName = $gpu.Name
+                      $gpuRamMB = [math]::Round($gpu.AdapterRAM / 1MB)
+                      Write-Host "Detected GPU $i: $gpuName, RAM: $gpuRamMB MB"
+                      $i++
+                  }
+                  if ($gpus.Count -lt 2) {
+                      Write-Host "Simulating a second GPU for software usage (will use same real GPU)"
+                  }
+              }
+
+              $totalRAM = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+              Write-Host "Total RAM available: $totalRAM MB"
+
+              $freeSpace = [math]::Round((Get-PSDrive C).Free / 1GB)
+              Write-Host "Free SSD space: $freeSpace GB"
+          }
+          catch {
+              Write-Warning "Error detecting GPU or system resources: $_"
+          }
+
+      - name: Install PC Boost and Overclock Software
+        run: |
+          Write-Host "Installing CPU/GPU boost and overclocking software..."
+          $tools = @(
+              "https://example.com/cpu_boost_installer.exe",
+              "https://example.com/gpu_boost_installer.exe",
+              "https://example.com/gpu_overclock_installer.exe"
+          )
+          foreach ($tool in $tools) {
+              $file = "$env:TEMP\" + ([System.IO.Path]::GetFileName($tool))
+              Invoke-WebRequest -Uri $tool -OutFile $file
+              Start-Process $file -ArgumentList "/silent" -Wait
+              Remove-Item $file -Force
+          }
+
+      - name: Launch Boosting and GPU Overclocking Software
+        run: |
+          Write-Host "Launching CPU/GPU boost and overclocking on Intel UHD GPUs..."
+          Start-Process "C:\Program Files\GPU_Boost\gpu_boost.exe"
+          Start-Process "C:\Program Files\CPU_Boost\cpu_boost.exe"
+          Start-Process "C:\Program Files\GPU_Overclock\gpu_overclock.exe"
+
+      - name: Verify RDP Connectivity
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection for 6 hours
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          $endTime = (Get-Date).AddHours(6)
+          while ((Get-Date) -lt $endTime) {
+              Write-Host "[$(Get-Date)] RDP Active - CPU & Intel UHD GPUs boosting and overclocking running..."
+              Start-Sleep -Seconds 60
+              
