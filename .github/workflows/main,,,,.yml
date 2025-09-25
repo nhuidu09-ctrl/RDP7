@@ -1,0 +1,258 @@
+name: RDP Windows Server 2025 - RTX 4080 in Task Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Durata rulării (ore)'
+        required: false 
+        default: '6'
+        type: choice
+        options:
+        - '2'
+        - '4'
+        - '6'
+        - '8'
+
+jobs:
+  rtx4080-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.runtime_hours)) * 60 }}
+
+    steps:
+    - name: Configure RTX 4080 in System Registry
+      run: |
+        Write-Host "🎮 Configurare RTX 4080 în sistem..."
+        
+        # Creăm intrări de registry pentru a simula RTX 4080
+        $gpuPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI\VEN_10DE&DEV_2684&SUBSYS_00000000"
+        New-Item -Path $gpuPath -Force | Out-Null
+        New-Item -Path "$gpuPath\0000" -Force | Out-Null
+        
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "DeviceDesc" -Value "NVIDIA GeForce RTX 4080" -Force
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "HardwareID" -Value "PCI\VEN_10DE&DEV_2684&SUBSYS_00000000" -Force
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "Class" -Value "Display" -Force
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "ClassGUID" -Value "{4d36e968-e325-11ce-bfc1-08002be10318}" -Force
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "Driver" -Value "{4d36e968-e325-11ce-bfc1-08002be10318}\0000" -Force
+        Set-ItemProperty -Path "$gpuPath\0000" -Name "Mfg" -Value "NVIDIA" -Force
+
+        # Setări pentru driver
+        $displayPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
+        New-Item -Path $displayPath -Force | Out-Null
+        
+        Set-ItemProperty -Path $displayPath -Name "DriverDesc" -Value "NVIDIA GeForce RTX 4080" -Force
+        Set-ItemProperty -Path $displayPath -Name "ProviderName" -Value "NVIDIA" -Force
+        Set-ItemProperty -Path $displayPath -Name "DriverVersion" -Value "31.0.15.4617" -Force
+        Set-ItemProperty -Path $displayPath -Name "AdapterCompatibility" -Value "NVIDIA" -Force
+        Set-ItemProperty -Path $displayPath -Name "AdapterRAM" -Value 17163026432 -Force
+
+        Write-Host "✅ RTX 4080 configurat în registry"
+
+    - name: Create Fake GPU Performance Data
+      run: |
+        Write-Host "📊 Creare date performanță GPU simulate..."
+        
+        # Script pentru a genera date de performanță fake
+        $perfScript = @"
+        `$perfPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage"
+        
+        # Adăugăm contoare de performanță simulate pentru GPU
+        `$gpuCounters = @{
+            "GPU Engine" = 1000
+            "GPU Memory" = 1001  
+            "GPU Utilization" = 1002
+        }
+        
+        foreach (`$counter in `$gpuCounters.GetEnumerator()) {
+            Set-ItemProperty -Path `$perfPath -Name `$counter.Value -Value `$counter.Key -Force
+        }
+"@
+        
+        Invoke-Expression $perfScript
+        Write-Host "✅ Date performanță GPU create"
+
+    - name: Create Task Manager Simulation Script
+      run: |
+        Write-Host "🖥️ Creare script simulare Task Manager..."
+        
+        $taskManagerScript = @"
+        function Show-SimulatedTaskManager {
+            param([int]`$Duration = 360)
+            
+            `$startTime = Get-Date
+            `$endTime = `$startTime.AddMinutes(`$Duration)
+            
+            while ((Get-Date) -lt `$endTime) {
+                `$cpuUsage = Get-Random -Minimum 5 -Maximum 45
+                `$ramUsage = Get-Random -Minimum 8 -Maximum 14
+                `$gpuUsage = Get-Random -Minimum 15 -Maximum 65
+                `$gpuMemory = Get-Random -Minimum 4 -Maximum 12
+                `$gpuTemp = Get-Random -Minimum 45 -Maximum 75
+                
+                Clear-Host
+                Write-Host "=" * 70
+                Write-Host "🎮 TASK MANAGER SIMULAT - RTX 4080"
+                Write-Host "=" * 70
+                Write-Host ""
+                Write-Host "📊 PERFORMANȚĂ:"
+                Write-Host "   ⚡ CPU:  [", ("█" * (`$cpuUsage/5)), (" " * (20-`$cpuUsage/5)), "] `$cpuUsage%"
+                Write-Host "   🧠 MEMORIE: [", ("█" * (`$ramUsage)), (" " * (16-`$ramUsage)), "] `$ramUsage GB/16 GB"
+                Write-Host "   🎮 GPU:  [", ("█" * (`$gpuUsage/5)), (" " * (20-`$gpuUsage/5)), "] `$gpuUsage%"
+                Write-Host "   💾 GPU MEM: [", ("█" * (`$gpuMemory)), (" " * (16-`$gpuMemory)), "] `$gpuMemory GB/16 GB"
+                Write-Host "   🌡️  TEMP GPU: `$gpuTemp°C"
+                Write-Host ""
+                Write-Host "🔧 SPECIFICAȚII HARDWARE SIMULATE:"
+                Write-Host "   🖥️  Procesor: Intel Xeon 8 Core @ 3.8GHz"
+                Write-Host "   🧠 Memorie: 16 GB DDR5"
+                Write-Host "   🎮 GPU: NVIDIA GeForce RTX 4080 (16 GB)"
+                Write-Host "   💾 Stocare: 300 GB NVMe SSD"
+                Write-Host ""
+                Write-Host "🌐 CONEXIUNE RDP:"
+                Write-Host "   📡 IP: `$env:TAILSCALE_IP"
+                Write-Host "   👤 User: `$env:RDP_USERNAME"
+                Write-Host "   ⏰ Timp rămas: `$([math]::Round((`$endTime - (Get-Date)).TotalMinutes)) minute"
+                Write-Host ""
+                Write-Host "=" * 70
+                
+                Start-Sleep -Seconds 2
+            }
+        }
+        
+        # Rulează Task Manager simulat
+        Show-SimulatedTaskManager -Duration `$using:runtimeMinutes
+"@
+        
+        Set-Content -Path "$env:TEMP\taskmanager.ps1" -Value $taskManagerScript
+        Write-Host "✅ Script Task Manager creat"
+
+    - name: Optimize System for RTX Simulation
+      run: |
+        Write-Host "🔧 Optimizare sistem pentru RTX 4080..."
+        
+        # High performance power plan
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        
+        # Setări de performanță
+        Set-ItemProperty -Path "HKCU:\Software\Microsoft\DirectX" -Name "GraphicsPerformance" -Value 1 -Force
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Graphics" -Name "GraphicsPerformance" -Value 1 -Force
+        
+        Write-Host "✅ Sistem optimizat pentru RTX 4080"
+
+    - name: Configure RDP
+      run: |
+        Write-Host "🌐 Configurare RDP..."
+        
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        netsh advfirewall firewall add rule name="RDP-RTX4080" dir=in protocol=TCP localport=3389 action=allow
+        
+        Write-Host "✅ RDP configurat"
+
+    - name: Create RDP User
+      run: |
+        Write-Host "👤 Creare utilizator RDP..."
+        
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        New-LocalUser -Name "RTXUser" -Password $securePassword -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "RTXUser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RTXUser"
+        
+        echo "RDP_USERNAME=RTXUser" >> $env:GITHUB_ENV
+        echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        
+        Write-Host "✅ Utilizator creat"
+
+    - name: Install Tailscale
+      run: |
+        Write-Host "🔗 Instalare Tailscale..."
+        
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart")
+        Start-Sleep -Seconds 10
+
+    - name: Connect Tailscale
+      run: |
+        Write-Host "🌍 Conectare Tailscale..."
+        
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=rtx4080-$env:GITHUB_RUN_ID
+        
+        $maxRetries = 20
+        $retryCount = 0
+        do {
+            Start-Sleep -Seconds 3
+            $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            $retryCount++
+        } while (-not $tsIP -and $retryCount -lt $maxRetries)
+        
+        if (-not $tsIP) {
+            Write-Host "❌ Eroare: Nu s-a primit IP Tailscale"
+            exit 1
+        }
+        
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+        Write-Host "✅ IP Tailscale: $tsIP"
+
+    - name: Display Connection Info
+      run: |
+        Write-Host ""
+        Write-Host "=" * 60
+        Write-Host "🎯 RDP CU RTX 4080 - CONEXIUNE"
+        Write-Host "=" * 60
+        Write-Host "🌐 IP: $env:TAILSCALE_IP"
+        Write-Host "👤 User: $env:RDP_USERNAME" 
+        Write-Host "🔐 Parola: $env:RDP_PASSWORD"
+        Write-Host "🔢 Port: 3389"
+        Write-Host ""
+        Write-Host "💻 HARDWARE SIMULAT:"
+        Write-Host "   🎮 NVIDIA GeForce RTX 4080 16GB"
+        Write-Host "   ⚡ Intel Xeon 8 Core 3.8GHz"
+        Write-Host "   🧠 16 GB DDR5 RAM"
+        Write-Host "   💾 300 GB NVMe SSD"
+        Write-Host ""
+        Write-Host "📝 Deschide Task Manager pentru a vedea RTX 4080!"
+        Write-Host "=" * 60
+        Write-Host ""
+
+    - name: Run RTX 4080 Simulation
+      run: |
+        Write-Host "🚀 Pornire simulare RTX 4080..."
+        
+        # Pornim Task Manager simulat
+        $runtimeHours = ${{ inputs.runtime_hours }}
+        $runtimeMinutes = $runtimeHours * 60
+        
+        Start-Job -ScriptBlock {
+            . "$env:TEMP\taskmanager.ps1"
+        }
+        
+        # Monitorizare principală
+        $endTime = (Get-Date).AddHours($runtimeHours)
+        
+        while ((Get-Date) -lt $endTime) {
+            $timeLeft = $endTime - (Get-Date)
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ✅ RTX 4080 Active - Rămas: $([math]::Round($timeLeft.TotalHours, 1))h"
+            Write-Host "   IP: $env:TAILSCALE_IP | User: $env:RDP_USERNAME"
+            Start-Sleep -Seconds 300
+        }
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Curățare..."
+        
+        Get-Job | Stop-Job -PassThru | Remove-Job -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force
+        netsh advfirewall firewall delete rule name="RDP-RTX4080"
+        Remove-LocalUser -Name "RTXUser" -ErrorAction SilentlyContinue
+        
+        # Șterge setările GPU simulate
+        Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\PCI\VEN_10DE&DEV_2684&SUBSYS_00000000" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000" -Recurse -Force -ErrorAction SilentlyContinue
+        
+        Write-Host "✅ Curățare completă"
