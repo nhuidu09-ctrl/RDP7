@@ -1,0 +1,266 @@
+name: Windows Server 2025 High-Performance RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Runtime in minutes (max 360)'
+        required: true
+        default: '360'
+        type: choice
+        options:
+        - 60
+        - 180
+        - 360
+
+jobs:
+  windows-server-2025-rdp:
+    runs-on: windows-2025
+    timeout-minutes: ${{ github.event.inputs.duration }}
+
+    steps:
+    - name: Check Windows Server Version
+      run: |
+        Write-Host "=== Windows Server Information ==="
+        systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+        Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsHardwareAbstractionLayer
+
+    - name: Install Windows Server Features
+      run: |
+        Write-Host "=== Installing Server Features ==="
+        
+        # Enable essential server features
+        Install-WindowsFeature -Name "Server-Gui-Mgmt-Infra", "Server-Gui-Shell" -IncludeManagementTools
+        
+        # Enable performance features
+        Install-WindowsFeature -Name "PowerShell-V2", "Net-Framework-Core", "Web-Server" -IncludeManagementTools
+
+    - name: Detect and Configure GPU
+      run: |
+        Write-Host "=== GPU Detection on Windows Server 2025 ==="
+        
+        # Get detailed GPU information
+        Get-CimInstance -ClassName Win32_VideoController | Format-List *
+        
+        # Check for DirectX support
+        Write-Host "DirectX Version:"
+        Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\DirectX" -ErrorAction SilentlyContinue
+        
+        # Enable hardware acceleration for server
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\DWM" -Name "EnableMachineCheck" -Value 1 -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "UseRemoteDesktopTheme" -Value 1 -ErrorAction SilentlyContinue
+
+    - name: Configure Server Performance
+      run: |
+        Write-Host "=== Windows Server 2025 Performance Tuning ==="
+        
+        # Set high performance power plan
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        
+        # Server performance optimizations
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "LargeSystemCache" -Value 1
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -Value 1
+        
+        # Network performance tuning
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF
+        
+        # Disable unnecessary services for better performance
+        $servicesToDisable = @("XboxGipSvc", "XboxNetApiSvc", "TabletInputService", "WSearch")
+        foreach ($service in $servicesToDisable) {
+            Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+        }
+
+    - name: Install Development Tools
+      run: |
+        Write-Host "=== Installing Development Stack ==="
+        
+        # Install Chocolatey
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # Install development tools
+        choco install -y git nodejs python3 vscode googlechrome firefox --no-progress
+        
+        # Install .NET SDKs
+        choco install -y dotnet-8.0-sdk dotnet-7.0-sdk --no-progress
+        
+        # Install database tools
+        choco install -y mysql-workbench postgresql12 --no-progress
+
+    - name: Configure RDP for Server 2025
+      run: |
+        Write-Host "=== Configuring RDP on Windows Server 2025 ==="
+        
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        
+        # Server-specific RDP optimizations
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MaxMonitors" -Value 8
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MaxXResolution" -Value 5120
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MaxYResolution" -Value 2880
+        
+        # Enable 32-bit color depth
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "ColorDepth" -Value 4
+        
+        # Configure firewall
+        netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes
+        netsh advfirewall firewall add rule name="RDP-Server-2025" dir=in action=allow protocol=TCP localport=3389
+
+    - name: Create Server Administrator Account
+      run: |
+        Write-Host "=== Creating Server Administrator Account ==="
+        
+        # Generate secure password
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(20, 8)
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Create server admin account
+        New-LocalUser -Name "ServerAdmin" -Password $securePass -AccountNeverExpires -FullName "Server Administrator"
+        Add-LocalGroupMember -Group "Administrators" -Member "ServerAdmin"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "ServerAdmin"
+        Add-LocalGroupMember -Group "Performance Monitor Users" -Member "ServerAdmin"
+        
+        # Enable the account
+        Enable-LocalUser -Name "ServerAdmin"
+        
+        echo "RDP_CREDS=User: ServerAdmin | Password: $password" >> $env:GITHUB_ENV
+
+    - name: Install and Configure Tailscale
+      run: |
+        Write-Host "=== Installing Tailscale ==="
+        
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        
+        # Wait for installation to complete
+        Start-Sleep -Seconds 10
+
+    - name: Establish Secure Connection
+      run: |
+        Write-Host "=== Setting up Tailscale Connection ==="
+        
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=ws2025-$env:GITHUB_RUN_ID --accept-routes
+        
+        # Get Tailscale IP
+        $retries = 0
+        while ($retries -lt 15) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            if ($tsIP -and $tsIP -notlike "*unset*") {
+                echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+                Write-Host "Tailscale IP: $tsIP"
+                break
+            }
+            Start-Sleep -Seconds 2
+            $retries++
+        }
+        
+        if (-not $env:TAILSCALE_IP) {
+            Write-Error "Failed to get Tailscale IP"
+            exit 1
+        }
+
+    - name: Server Performance Test
+      run: |
+        Write-Host "=== Windows Server 2025 Performance Test ==="
+        
+        # Server hardware info
+        Write-Host "CPU Cores: $( (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors )"
+        Write-Host "Total Memory: $( [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2) ) GB"
+        Write-Host "OS Architecture: $( (Get-CimInstance Win32_OperatingSystem).OSArchitecture )"
+        
+        # Performance test script
+        $perfTest = @"
+import time
+import multiprocessing
+import psutil
+import os
+
+print("=== Server Performance Test ===")
+print(f"CPU Cores: {multiprocessing.cpu_count()}")
+print(f"Total RAM: {psutil.virtual_memory().total / (1024**3):.2f} GB")
+print(f"Available RAM: {psutil.virtual_memory().available / (1024**3):.2f} GB")
+
+# CPU stress test
+print("\n--- CPU Test ---")
+start_time = time.time()
+results = []
+for i in range(1000000):
+    results.append(i * i)
+cpu_time = time.time() - start_time
+print(f"CPU Calculation Time: {cpu_time:.3f} seconds")
+
+# Memory test
+print("\n--- Memory Test ---")
+large_list = list(range(1000000))
+memory_usage = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"Memory Usage: {memory_usage:.2f} MB")
+
+print("\n✅ Performance test completed!")
+"@
+        
+        # Install psutil and run test
+        pip install psutil
+        $perfTest | Out-File -FilePath "perf_test.py" -Encoding utf8
+        python perf_test.py
+
+    - name: Display Server Connection Info
+      run: |
+        Write-Host "`n" + "="*60
+        Write-Host "🚀 WINDOWS SERVER 2025 RDP READY"
+        Write-Host "="*60
+        Write-Host "📍 Tailscale Address: $env:TAILSCALE_IP"
+        Write-Host "👤 Username: ServerAdmin" 
+        Write-Host "🔐 Password: $(echo $env:RDP_CREDS | cut -d':' -f3-)"
+        Write-Host "⏱️  Timeout: ${{ github.event.inputs.duration }} minutes"
+        Write-Host "💻 OS: Windows Server 2025"
+        Write-Host "🎯 Optimized for server performance"
+        Write-Host "="*60
+        Write-Host ""
+
+    - name: Start Server Monitoring
+      run: |
+        Write-Host "=== Starting Server Performance Monitor ==="
+        
+        # Server monitoring script
+        $monitorScript = {
+            while ($true) {
+                try {
+                    $cpu = (Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval 1 -MaxSamples 2 | 
+                           Select-Object -ExpandProperty CounterSamples | 
+                           Select-Object -Last 1).CookedValue
+                    $memory = (Get-Counter "\Memory\% Committed Bytes In Use" -SampleInterval 1 -MaxSamples 2 | 
+                             Select-Object -ExpandProperty CounterSamples | 
+                             Select-Object -Last 1).CookedValue
+                    $disk = (Get-Counter "\LogicalDisk(C:)\% Disk Time" -SampleInterval 1 -MaxSamples 2 | 
+                            Select-Object -ExpandProperty CounterSamples | 
+                            Select-Object -Last 1).CookedValue
+                    
+                    $timestamp = Get-Date -Format "HH:mm:ss"
+                    Write-Host "[$timestamp] CPU: $([math]::Round($cpu,1))% | Memory: $([math]::Round($memory,1))% | Disk: $([math]::Round($disk,1))%"
+                }
+                catch {
+                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Monitoring error: $($_.Exception.Message)"
+                }
+                Start-Sleep -Seconds 30
+            }
+        }
+        
+        Start-Job -ScriptBlock $monitorScript
+        
+        # Keep the workflow running
+        Write-Host "🔄 Windows Server 2025 RDP Session Active"
+        Write-Host "📊 Performance monitoring enabled (30s intervals)"
+        Write-Host "⏹️  Stop the workflow to terminate the session"
+        
+        $startTime = Get-Date
+        while ($true) {
+            $elapsed = (Get-Date) - $startTime
+            Write-Host "⏰ Server Uptime: $([math]::Floor($elapsed.TotalHours))h $($elapsed.Minutes)m $($elapsed.Seconds)s"
+            Start-Sleep -Seconds 60
+        }
