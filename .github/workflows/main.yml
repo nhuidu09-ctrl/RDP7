@@ -1,0 +1,98 @@
+name: RDP-Windows-Server-2025-QEMU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+
+    steps:
+      - name: Instalează dependențe QEMU și KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-clients libvirt-daemon-system bridge-utils
+
+      - name: Crează imagine QCOW2 de 500GB dacă nu există
+        run: |
+          if [ ! -f windows_server_2025.qcow2 ]; then
+            qemu-img create -f qcow2 windows_server_2025.qcow2 500G
+            # Încarcă sau folosește ISO pentru instalare dacă dorești
+          fi
+
+      - name: Rulează VM Windows Server 2025 în QEMU cu 32GB RAM, Ryzen7 emulat
+        run: |
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 32768 \
+            -smp 8 \
+            -cpu host \
+            -machine q35,accel=kvm \
+            -drive file=windows_server_2025.qcow2,if=virtio,cache=writeback,discard=unmap \
+            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
+            -device virtio-net,netdev=net0 \
+            -bios /usr/share/OVMF/OVMF_CODE.fd \
+            -usb -device usb-tablet -device usb-kbd \
+            -vga qxl &
+
+          sleep 60
+
+      - name: Configurează Remote Desktop în VM (dupa ce VM-ul rulează)
+        run: |
+          # Presupunem că poți folosi PowerShell Remoting pentru configurare (exemplu)
+          pwsh -Command "
+          Invoke-Command -ComputerName 127.0.0.1 -Port 3389 -ScriptBlock {
+            Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+            Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'UserAuthentication' -Value 0 -Force
+            Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'SecurityLayer' -Value 0 -Force
+            netsh advfirewall firewall add rule name='RDP-Tailscale' dir=in action=allow protocol=TCP localport=3389
+            Restart-Service -Name TermService -Force
+          }"
+
+      - name: Crează utilizator RDP cu parolă securizată în VM
+        run: |
+          pwsh -Command "
+          \$charsUpper = [char[]](65..90)
+          \$charsLower = [char[]](97..122)
+          \$charsNumber = [char[]](48..57)
+          \$charsSpecial = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          \$passwordChars = (\$charsUpper | Get-Random -Count 4) + (\$charsLower | Get-Random -Count 4) + (\$charsNumber | Get-Random -Count 4) + (\$charsSpecial | Get-Random -Count 4)
+          \$password = -join (\$passwordChars | Sort-Object { Get-Random })
+          \$securePass = ConvertTo-SecureString \$password -AsPlainText -Force
+          New-LocalUser -Name 'RDP' -Password \$securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group 'Administrators' -Member 'RDP'
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'RDP'
+          Write-Output \"RDP user 'RDP' creat cu parola: \$password\"
+          "
+
+      - name: Instalează și configurează Tailscale în VM
+        run: |
+          pwsh -Command "
+          \$tsUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi'
+          \$installerPath = \"\$env:TEMP\\tailscale.msi\"
+          Invoke-WebRequest -Uri \$tsUrl -OutFile \$installerPath
+          Start-Process msiexec.exe -ArgumentList '/i', \"\$installerPath\", '/quiet', '/norestart' -Wait
+          Remove-Item \$installerPath -Force
+          & \"$env:ProgramFiles\\Tailscale\\tailscale.exe\" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-\$env:GITHUB_RUN_ID
+          "
+
+      - name: Verifică accesul RDP prin Tailscale
+        run: |
+          pwsh -Command "
+          \$tsIp = & \"$env:ProgramFiles\\Tailscale\\tailscale.exe\" ip -4
+          Write-Host \"Tailscale IP: \$tsIp\"
+          \$test = Test-NetConnection -ComputerName \$tsIp -Port 3389
+          if (-not \$test.TcpTestSucceeded) { throw 'Nu s-a putut conecta la portul RDP 3389' }
+          else { Write-Host 'Conectivitate RDP testată cu succes!' }
+          "
+
+      - name: Menține conexiunea activă - așteaptă input
+        run: |
+          pwsh -Command "
+          while ($true) {
+            Write-Host 'RDP activ... apasă Ctrl+C pentru oprire'
+            Start-Sleep -Seconds 300
+          }
+          "
+          
