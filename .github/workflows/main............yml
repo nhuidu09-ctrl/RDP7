@@ -1,0 +1,112 @@
+name: WindowsServer2025-RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qemu-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 6 ore
+
+    env:
+      USERNAME: rdpuser
+      PASSWORD: SuperParola123!
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm genisoimage curl
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-ws2025-${{ github.run_id }}
+
+      - name: Download Windows Server 2025 ISO
+        run: |
+          mkdir -p ~/iso
+          cd ~/iso
+          # ISO oficial trial (Evaluation)
+          wget -O ws2025.iso "https://software-download.microsoft.com/download/sg/Windows_Server_2025.iso"
+
+      - name: Create autounattend.xml
+        run: |
+          cat > autounattend.xml <<'EOF'
+          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="oobeSystem">
+              <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <UserAccounts>
+                  <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                      <Password>
+                        <Value>SuperParola123!</Value>
+                        <PlainText>true</PlainText>
+                      </Password>
+                      <Description>RDP User</Description>
+                      <DisplayName>rdpuser</DisplayName>
+                      <Group>Administrators</Group>
+                      <Name>rdpuser</Name>
+                    </LocalAccount>
+                  </LocalAccounts>
+                </UserAccounts>
+                <AutoLogon>
+                  <Password>
+                    <Value>SuperParola123!</Value>
+                    <PlainText>true</PlainText>
+                  </Password>
+                  <Username>rdpuser</Username>
+                  <Enabled>true</Enabled>
+                </AutoLogon>
+                <RegisteredOwner>GitHub</RegisteredOwner>
+                <TimeZone>UTC</TimeZone>
+              </component>
+            </settings>
+            <settings pass="specialize">
+              <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <fDenyTSConnections>false</fDenyTSConnections>
+              </component>
+              <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <UserAuthentication>0</UserAuthentication>
+              </component>
+            </settings>
+          </unattend>
+          EOF
+
+          mkdir -p ~/autounattend
+          cp autounattend.xml ~/autounattend/
+          genisoimage -o ~/autounattend.iso -volid cidata -joliet -rock ~/autounattend
+
+      - name: Create 256GB SSD disk
+        run: |
+          mkdir -p ~/vm
+          qemu-img create -f qcow2 -o preallocation=off ~/vm/server2025.qcow2 256G
+
+      - name: Start QEMU with unattended install
+        run: |
+          nohup qemu-system-x86_64 \
+            -enable-kvm \
+            -m 16384 \
+            -cpu Skylake-Client \
+            -smp 4 \
+            -drive file=~/vm/server2025.qcow2,format=qcow2,if=virtio \
+            -cdrom ~/iso/ws2025.iso \
+            -drive file=~/autounattend.iso,media=cdrom \
+            -netdev user,id=n1,hostfwd=tcp::3389-:3389 \
+            -device virtio-net-pci,netdev=n1 \
+            -vga qxl \
+            -nographic > vm.log 2>&1 &
+
+          sleep 60
+          echo "QEMU VM started with Windows Server 2025 auto-install on 256GB SSD."
+
+      - name: Show connection info
+        run: |
+          echo "=== RDP ACCESS INFO ==="
+          echo "Tailscale IP: $(tailscale ip -4)"
+          echo "Username: $USERNAME"
+          echo "Password: $PASSWORD"
+          echo "========================"
+          echo "VM log tail:"
+          tail -f vm.log
+          
