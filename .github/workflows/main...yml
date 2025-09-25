@@ -1,0 +1,53 @@
+name: RDP-QEMU-Windows-Server2025
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 380
+
+    steps:
+      - name: Install QEMU and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils
+
+      - name: Create qcow2 500GB image if missing
+        run: |
+          if [ ! -f windows_server_2025.qcow2 ]; then
+            qemu-img create -f qcow2 windows_server_2025.qcow2 500G
+          fi
+
+      - name: Start VM with forwarded RDP port and user-mode network with IP 100.64.x.x
+        id: start_vm
+        run: |
+          IP_SUFFIX=$(( RANDOM % 254 + 1 ))
+          IP="100.64.0.$IP_SUFFIX"
+          nohup qemu-system-x86_64 \
+            -enable-kvm \
+            -m 32768 \
+            -smp 8 \
+            -cpu host \
+            -machine q35,accel=kvm \
+            -drive file=windows_server_2025.qcow2,if=virtio,cache=writeback,discard=unmap \
+            -netdev user,id=net0,hostfwd=tcp::3389-:3389,ipv4=$IP \
+            -device virtio-net,netdev=net0 \
+            -bios /usr/share/OVMF/OVMF_CODE.fd \
+            -usb -device usb-tablet -device usb-kbd \
+            -vga qxl > vm.log 2>&1 &
+
+          sleep 90
+          echo "::set-output name=vm_ip::$IP"
+
+      - name: Output connection information
+        run: |
+          echo "RDP IP: ${{ steps.start_vm.outputs.vm_ip }}:3389"
+          echo "Username: RDP"
+          echo "Password: (vedeți în console VM sau scriptul PowerShell din VM)"
+
+      - name: Keep VM alive for 6 hours
+        run: |
+          timeout $((6*3600)) bash -c 'while true; do sleep 300; done' || echo "6 ore trecute, workflow oprit."
+
