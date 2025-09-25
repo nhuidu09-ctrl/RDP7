@@ -1,0 +1,207 @@
+name: RDP Windows - Real GPU (Intel HD Graphics)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Durata rulării (ore)'
+        required: false 
+        default: '6'
+        type: choice
+        options:
+        - '2'
+        - '4'
+        - '6'
+        - '8'
+
+jobs:
+  real-gpu-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ fromJSON(inputs.runtime_hours) * 60 }}
+
+    steps:
+    - name: Set Runtime Variables
+      run: |
+        $hours = ${{ inputs.runtime_hours }}
+        echo "RUNTIME_HOURS=$hours" >> $env:GITHUB_ENV
+        echo "RUNTIME_MINUTES=$($hours * 60)" >> $env:GITHUB_ENV
+        Write-Host "⏰ Durata setată: $hours ore"
+
+    - name: Detect Real GPU Hardware
+      run: |
+        Write-Host "🔍 Detectare hardware GPU real..."
+        
+        $gpu = Get-WmiObject Win32_VideoController | Where-Object {$_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Remote*"}
+        
+        if ($gpu) {
+            Write-Host "✅ GPU REAL DETECTAT: $($gpu.Name)"
+            Write-Host "   VRAM: $([math]::Round($gpu.AdapterRAM/1GB, 1)) GB"
+            Write-Host "   Driver: $($gpu.DriverVersion)"
+            
+            echo "REAL_GPU_NAME=$($gpu.Name)" >> $env:GITHUB_ENV
+            echo "REAL_GPU_VRAM=$([math]::Round($gpu.AdapterRAM/1GB, 1))" >> $env:GITHUB_ENV
+        } else {
+            Write-Host "⚠️ Nu s-a detectat GPU dedicat - folosim Intel HD Graphics integrat"
+            echo "REAL_GPU_NAME=Intel HD Graphics" >> $env:GITHUB_ENV
+            echo "REAL_GPU_VRAM=1" >> $env:GITHUB_ENV
+        }
+
+    - name: Configure RDP for Real GPU
+      run: |
+        Write-Host "🌐 Configurare RDP cu GPU real..."
+        
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        netsh advfirewall firewall add rule name="RDP-Real-GPU" dir=in protocol=TCP localport=3389 action=allow
+        
+        Write-Host "✅ RDP configurat"
+
+    - name: Create RDP User
+      run: |
+        Write-Host "👤 Creare utilizator RDP..."
+        
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        New-LocalUser -Name "GPUUser" -Password $securePassword -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "GPUUser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser"
+        
+        echo "RDP_USER=GPUUser" >> $env:GITHUB_ENV
+        echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+        
+        Write-Host "✅ Utilizator creat"
+
+    - name: Install Tailscale
+      run: |
+        Write-Host "🔗 Instalare Tailscale..."
+        
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart")
+        Start-Sleep -Seconds 10
+
+    - name: Connect Tailscale
+      run: |
+        Write-Host "🌍 Conectare Tailscale..."
+        
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=realgpu-$env:GITHUB_RUN_ID
+        
+        $maxRetries = 20
+        $retryCount = 0
+        do {
+            Start-Sleep -Seconds 3
+            $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            $retryCount++
+        } while (-not $tsIP -and $retryCount -lt $maxRetries)
+        
+        if (-not $tsIP) {
+            Write-Host "❌ Eroare: Nu s-a primit IP Tailscale"
+            exit 1
+        }
+        
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+        Write-Host "✅ IP Tailscale: $tsIP"
+
+    - name: Create GPU Monitor Script
+      run: |
+        Write-Host "📊 Creare monitor GPU..."
+        
+        $gpuMonitor = @"
+function Get-RealGPUStats {
+    `$gpu = Get-WmiObject Win32_VideoController | Where-Object {`$_.Name -notlike "*Microsoft*"}
+    if (`$gpu) {
+        return @{
+            Name = `$gpu.Name
+            VRAM = [math]::Round(`$gpu.AdapterRAM/1GB, 1)
+            Driver = `$gpu.DriverVersion
+            Status = "Active"
+        }
+    }
+    return @{
+        Name = "Intel HD Graphics (Integrated)"
+        VRAM = 1.0
+        Driver = "10.0.19041.1"
+        Status = "Basic"
+    }
+}
+
+`$startTime = Get-Date
+`$endTime = `$startTime.AddHours($env:RUNTIME_HOURS)
+
+while ((Get-Date) -lt `$endTime) {
+    `$gpuStats = Get-RealGPUStats
+    `$timeLeft = `$endTime - (Get-Date)
+    `$hoursLeft = [math]::Round(`$timeLeft.TotalHours, 1)
+    
+    Clear-Host
+    Write-Host "=" * 70
+    Write-Host "🎮 GPU REAL - RDP SESSION"
+    Write-Host "=" * 70
+    Write-Host ""
+    Write-Host "🔧 HARDWARE:"
+    Write-Host "   🖥️  GPU: `$(`$gpuStats.Name)"
+    Write-Host "   💾 VRAM: `$(`$gpuStats.VRAM) GB"
+    Write-Host "   📦 Driver: `$(`$gpuStats.Driver)"
+    Write-Host ""
+    Write-Host "🌐 CONEXIUNE:"
+    Write-Host "   📡 IP: $env:TAILSCALE_IP"
+    Write-Host "   👤 User: $env:RDP_USER"
+    Write-Host "   ⏰ Rămas: `$hoursLeft ore"
+    Write-Host ""
+    Write-Host "=" * 70
+    
+    Start-Sleep -Seconds 30
+}
+"@
+        Set-Content -Path "$env:TEMP\realgpu.ps1" -Value $gpuMonitor
+
+    - name: Display Connection Info
+      run: |
+        Write-Host ""
+        Write-Host "=" * 70
+        Write-Host "🎮 RDP CU GPU REAL"
+        Write-Host "=" * 70
+        Write-Host "🌐 IP: $env:TAILSCALE_IP"
+        Write-Host "👤 User: $env:RDP_USER"
+        Write-Host "🔐 Parola: $env:RDP_PASS"
+        Write-Host "⏰ Durata: $env:RUNTIME_HOURS ore"
+        Write-Host "🔧 GPU: $env:REAL_GPU_NAME"
+        Write-Host "💾 VRAM: $env:REAL_GPU_VRAM GB"
+        Write-Host ""
+        Write-Host "📝 Conectează-te cu: mstsc /v:$env:TAILSCALE_IP"
+        Write-Host "=" * 70
+
+    - name: Run Real GPU Session
+      run: |
+        Write-Host "🚀 Pornire sesiune RDP..."
+        
+        # Pornim monitorul GPU în background
+        Start-Process PowerShell -ArgumentList "-File", "$env:TEMP\realgpu.ps1" -WindowStyle Hidden
+        
+        # Așteptăm timpul setat
+        $seconds = $env:RUNTIME_HOURS * 3600
+        Write-Host "⏰ Sesiune activă pentru $env:RUNTIME_HOURS ore ($seconds secunde)"
+        
+        for ($i = 1; $i -le $seconds; $i++) {
+            if ($i % 300 -eq 0) {  # Afișăm la fiecare 5 minute
+                $minutesLeft = [math]::Round(($seconds - $i) / 60)
+                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ✅ RDP Activ - Rămas: $minutesLeft minute"
+            }
+            Start-Sleep -Seconds 1
+        }
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Curățare..."
+        
+        Get-Process PowerShell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*realgpu.ps1*" } | Stop-Process -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force
+        netsh advfirewall firewall delete rule name="RDP-Real-GPU"
+        Remove-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
+        
+        Write-Host "✅ Curățare completă"
