@@ -1,0 +1,150 @@
+name: RDP Windows - Real GPU Premium
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Durata rulării (ore)'
+        required: false 
+        default: '6'
+        type: choice
+        options:
+        - '2'
+        - '4'
+        - '6'
+        - '8'
+
+jobs:
+  real-gpu-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.runtime_hours * 60 }}
+
+    steps:
+    - name: Set Runtime Variables
+      run: |
+        $hours = ${{ inputs.runtime_hours }}
+        echo "RUNTIME_HOURS=$hours" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        $minutes = $hours * 60
+        echo "RUNTIME_MINUTES=$minutes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "⏰ Durata setată: $hours ore"
+
+    - name: Detect GPU Hardware
+      run: |
+        Write-Host "🔍 Detectare hardware GPU..."
+        $gpus = Get-WmiObject Win32_VideoController
+        foreach ($gpu in $gpus) {
+            Write-Host "GPU: $($gpu.Name)"
+            Write-Host "VRAM: $([math]::Round($gpu.AdapterRAM/1GB, 2)) GB"
+            Write-Host "---"
+        }
+
+    - name: Configure RDP
+      run: |
+        Write-Host "🌐 Configurare RDP..."
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        netsh advfirewall firewall add rule name="RDP-GPU" dir=in protocol=TCP localport=3389 action=allow
+        Write-Host "✅ RDP configurat"
+
+    - name: Create RDP User
+      run: |
+        Write-Host "👤 Creare utilizator RDP..."
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        New-LocalUser -Name "GPUUser" -Password $securePassword -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "GPUUser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "GPUUser"
+        
+        echo "RDP_USER=GPUUser" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "RDP_PASS=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "✅ Utilizator creat"
+
+    - name: Install Tailscale
+      run: |
+        Write-Host "🔗 Instalare Tailscale..."
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart")
+        Start-Sleep -Seconds 10
+
+    - name: Connect Tailscale
+      run: |
+        Write-Host "🌍 Conectare Tailscale..."
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gpurdp-$env:GITHUB_RUN_ID
+        
+        $maxRetries = 10
+        $retryCount = 0
+        do {
+            Start-Sleep -Seconds 5
+            $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            $retryCount++
+        } while (-not $tsIP -and $retryCount -lt $maxRetries)
+        
+        if ($tsIP) {
+            echo "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "✅ IP Tailscale: $tsIP"
+        } else {
+            Write-Host "❌ Eroare la conectare Tailscale"
+            exit 1
+        }
+
+    - name: Create Simple Monitor
+      run: |
+        $monitorScript = @'
+`$startTime = Get-Date
+`$endTime = `$startTime.AddHours(`$env:RUNTIME_HOURS)
+
+while ((Get-Date) -lt `$endTime) {
+    `$timeLeft = `$endTime - (Get-Date)
+    `$hoursLeft = [math]::Round(`$timeLeft.TotalHours, 1)
+    
+    Clear-Host
+    Write-Host "=== RDP GPU Session ==="
+    Write-Host "Timp ramas: `$hoursLeft ore"
+    Write-Host "IP: `$env:TAILSCALE_IP"
+    Write-Host "User: `$env:RDP_USER"
+    Write-Host "========================"
+    Start-Sleep -Seconds 30
+}
+'@
+        Set-Content -Path "$env:TEMP\monitor.ps1" -Value $monitorScript
+
+    - name: Display Connection Info
+      run: |
+        Write-Host ""
+        Write-Host "=== INFORMATII CONEXIUNE ==="
+        Write-Host "IP: $env:TAILSCALE_IP"
+        Write-Host "User: $env:RDP_USER"
+        Write-Host "Parola: $env:RDP_PASS"
+        Write-Host "Durata: $env:RUNTIME_HOURS ore"
+        Write-Host "Conectare: mstsc /v:$env:TAILSCALE_IP"
+        Write-Host "============================"
+
+    - name: Run RDP Session
+      run: |
+        Write-Host "🚀 Pornire sesiune RDP..."
+        Start-Process PowerShell -ArgumentList "-File", "$env:TEMP\monitor.ps1" -WindowStyle Hidden
+        
+        $seconds = $env:RUNTIME_HOURS * 3600
+        Write-Host "⏰ Sesiune activa pentru $env:RUNTIME_HOURS ore"
+        
+        for ($i = 1; $i -le $seconds; $i++) {
+            if ($i % 300 -eq 0) {
+                $minutesLeft = [math]::Round(($seconds - $i) / 60)
+                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ✅ RDP Activ - Rămas: $minutesLeft minute"
+            }
+            Start-Sleep -Seconds 1
+        }
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "🧹 Curățare..."
+        Get-Process PowerShell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*monitor.ps1*" } | Stop-Process -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force
+        netsh advfirewall firewall delete rule name="RDP-GPU" 2>$null
+        Remove-LocalUser -Name "GPUUser" -ErrorAction SilentlyContinue
+        Write-Host "✅ Curățare completă"
